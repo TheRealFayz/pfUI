@@ -3,6 +3,82 @@ pfUI.api = { }
 -- load pfUI environment
 setfenv(1, pfUI:GetEnvironment())
 
+-- [ DLL Detection Helpers ]
+-- Detects presence of various DLL extensions for enhanced functionality
+
+-- [ HasSuperWoW ]
+-- Returns true if SuperWoW DLL is active
+-- SuperWoW provides: UNIT_CASTEVENT, UnitPosition, SetMouseoverUnit, SpellInfo, etc.
+function pfUI.api.HasSuperWoW()
+  return SUPERWOW_VERSION or (SetAutoloot and SpellInfo)
+end
+
+-- [ HasUnitXP ]
+-- Returns true if UnitXP_SP3 DLL is active
+-- UnitXP provides: distance, line of sight, behind detection, targeting helpers
+function pfUI.api.HasUnitXP()
+  local success = pcall(UnitXP, "nop", "nop")
+  return success
+end
+
+-- [ HasNampower ]
+-- Returns true if Nampower DLL is active
+-- Nampower provides: spell queuing, GetCastInfo, GetSpellIdCooldown, IsSpellInRange, etc.
+function pfUI.api.HasNampower()
+  return GetNampowerVersion and true or false
+end
+
+-- [ GetUnitDistance ]
+-- Returns distance to unit using best available method
+-- 'unit1'    [string]    first unit (default: "player")
+-- 'unit2'    [string]    second unit
+-- returns:   [number]    distance in yards, or nil if unavailable
+function pfUI.api.GetUnitDistance(unit1, unit2)
+  if not unit2 then
+    unit2 = unit1
+    unit1 = "player"
+  end
+
+  if not UnitExists(unit2) then return nil end
+
+  -- Try UnitXP first (most accurate)
+  if pfUI.api.HasUnitXP() then
+    local success, distance = pcall(UnitXP, "distanceBetween", unit1, unit2)
+    if success and distance then return distance end
+  end
+
+  -- Try SuperWoW UnitPosition
+  if pfUI.api.HasSuperWoW() and UnitPosition then
+    local x1, y1, z1 = UnitPosition(unit1)
+    local x2, y2, z2 = UnitPosition(unit2)
+    if x1 and y1 and z1 and x2 and y2 and z2 then
+      return ((x2 - x1)^2 + (y2 - y1)^2 + (z2 - z1)^2)^0.5
+    end
+  end
+
+  return nil
+end
+
+-- [ UnitInLineOfSight ]
+-- Returns true if unit1 has line of sight to unit2
+-- Requires UnitXP_SP3
+function pfUI.api.UnitInLineOfSight(unit1, unit2)
+  if not pfUI.api.HasUnitXP() then return nil end
+  local success, inSight = pcall(UnitXP, "inSight", unit1, unit2)
+  if success then return inSight end
+  return nil
+end
+
+-- [ UnitIsBehind ]
+-- Returns true if unit1 is behind unit2
+-- Requires UnitXP_SP3
+function pfUI.api.UnitIsBehind(unit1, unit2)
+  if not pfUI.api.HasUnitXP() then return nil end
+  local success, behind = pcall(UnitXP, "behind", unit1, unit2)
+  if success then return behind end
+  return nil
+end
+
 -- Client API shortcuts
 gfind = string.gmatch or string.gfind
 mod = math.mod or mod
@@ -65,9 +141,22 @@ function pfUI.api.UnitInRange(unit)
     return nil
   elseif CheckInteractDistance(unit, 4) then
     return 1
-  else
-    return librange:UnitInSpellRange(unit)
   end
+
+  -- UnitXP precise mode: skip librange entirely, use direct distance check
+  if C.unitframes.rangecheck_mode == "unitxp" and _G.UnitXP then
+    local threshold = tonumber(C.unitframes.rangecheck_distance) or 40
+    local success, distance = pcall(_G.UnitXP, "distanceBetween", "player", unit)
+    if success and distance then
+      return distance <= threshold and 1 or nil
+    end
+    -- fallthrough to librange if UnitXP fails
+  end
+
+  if pfUI.api.librange then
+    return pfUI.api.librange:UnitInSpellRange(unit)
+  end
+  return nil
 end
 
 -- [ RunOOC ]
@@ -369,18 +458,33 @@ end
 -- 'number'     [number]           the number that should be abbreviated
 -- 'returns:    [string]           the abbreviated value
 function pfUI.api.Abbreviate(number)
-  if pfUI_config.unitframes.abbrevnum == "1" then
+  local mode = pfUI_config.unitframes.abbrevnum
+  -- mode "0" = disabled (full numbers)
+  -- mode "1" = 2 decimals (4250 -> 4.25k) [legacy/default]
+  -- mode "2" = 1 decimal (4250 -> 4.2k) - always rounds DOWN
+  
+  if mode == "1" or mode == "2" then
     local sign = number < 0 and -1 or 1
     number = math.abs(number)
 
     if number > 1000000 then
-      return pfUI.api.round(number/1000000*sign,2) .. "m"
+      if mode == "2" then
+        -- 1 decimal, round DOWN: 4.18m -> 4.1m
+        return (floor(number/100000) / 10 * sign) .. "m"
+      else
+        return pfUI.api.round(number/1000000*sign, 2) .. "m"
+      end
     elseif number > 1000 then
-      return pfUI.api.round(number/1000*sign,2) .. "k"
+      if mode == "2" then
+        -- 1 decimal, round DOWN: 4180 -> 4.1k (not 4.2k)
+        return (floor(number/100) / 10 * sign) .. "k"
+      else
+        return pfUI.api.round(number/1000*sign, 2) .. "k"
+      end
     end
   end
 
-  return number
+  return math.floor(number)
 end
 
 -- [ SendChatMessageWide ]
@@ -661,7 +765,12 @@ function pfUI.api.LoadMovable(frame, init)
 
     for id, point in pairs(frame.posdata.pos) do
       local a, b, c, d, e = unpack(point)
-      if a and b then frame:SetPoint(a,b,c,d,e) end
+      -- skip if anchoring to itself (would cause WoW error)
+      if a and b and b ~= frame and b ~= frame:GetName() then
+        frame:SetPoint(a,b,c,d,e)
+      elseif a and (not b or b == frame or b == frame:GetName()) then
+        frame:SetPoint(a,d,e)
+      end
     end
   end
 end
@@ -953,7 +1062,7 @@ function pfUI.api.GetPerfectPixel()
   if pfUI.pixel then return pfUI.pixel end
 
   if pfUI_config.appearance.border.pixelperfect == "1" then
-    local scale = GetCVar("uiScale")
+    local scale = GetCVar("useUiScale") == "1" and GetCVar("uiScale") or "1"
     local resolution = GetCVar("gxResolution")
     local _, _, screenwidth, screenheight = strfind(resolution, "(.+)x(.+)")
 
@@ -1093,10 +1202,28 @@ end
 -- returns:   array of options as strings for pfUI.gui.bar
 function pfUI.api.BarLayoutOptions(barsize)
   assert(barsize > 0 and barsize <= NUM_ACTIONBAR_BUTTONS,"BarLayoutOptions: barsize "..tostring(barsize).." is invalid")
-  local options = {}
-  for i,layout in ipairs(pfGridmath[barsize]) do
-    options[i] = string.format("%d x %d",layout[1],layout[2])
+  local options, seen = {}, {}
+  local function add(option)
+    if not seen[option] then table.insert(options, option); seen[option] = true end
   end
+  for i,layout in ipairs(pfGridmath[barsize]) do
+    add(string.format("%d x %d",layout[1],layout[2]))
+  end
+  for _, option in ipairs({
+    "1 x 12", "1 x 10", "2 x 10", "2 x 5", "3 x 10", "3 x 5", "3 x 3",
+    "5 x 3", "10 x 3", "5 x 2", "10 x 2", "10 x 1", "12 x 1"
+  }) do add(option) end
+  table.sort(options, function(a, b)
+    local _, _, ac, ar = string.find(a, "(%d+)%s*x%s*(%d+)")
+    local _, _, bc, br = string.find(b, "(%d+)%s*x%s*(%d+)")
+    ac, ar = tonumber(ac) or 1, tonumber(ar) or 1
+    bc, br = tonumber(bc) or 1, tonumber(br) or 1
+    local ah = ac >= ar and 0 or 1
+    local bh = bc >= br and 0 or 1
+    if ah ~= bh then return ah < bh end
+    if ah == 0 then if ac ~= bc then return ac > bc end; return ar < br
+    else if ar ~= br then return ar > br end; return ac < bc end
+  end)
   return options
 end
 
@@ -1121,15 +1248,39 @@ function pfUI.api.BarLayoutFormfactor(option)
   end
 end
 
+local function ResolveBarLayout(barsize, formfactor, uneven)
+  local layout = tostring(formfactor or "")
+  local _, _, a, b = string.find(layout, "(%d+)%s*x%s*(%d+)")
+  if a and b then
+    local cols, rows = tonumber(a), tonumber(b)
+    cols = math.min(NUM_ACTIONBAR_BUTTONS, math.max(1, cols))
+    rows = math.min(NUM_ACTIONBAR_BUTTONS, math.max(1, rows))
+    local orientation = string.upper(uneven or "DOWN")
+    local mode = (orientation == "LEFT" or orientation == "RIGHT") and "cols" or "rows"
+    if mode == "rows" then
+      cols = math.max(1, math.min(cols, barsize))
+      rows = math.max(1, math.ceil(barsize / cols))
+    else
+      rows = math.max(1, math.min(rows, barsize))
+      cols = math.max(1, math.ceil(barsize / rows))
+    end
+    return cols, rows, mode, orientation
+  end
+  local index = pfUI.api.BarLayoutFormfactor(layout)
+  if not index then return nil end
+  local cols, rows = unpack(pfGridmath[barsize][index])
+  return cols, rows, "rows", "DOWN"
+end
+
 -- [ Bar Layout Size ] --
 -- 'bar'        frame reference,
 -- 'barsize'    integer number of buttons,
 -- 'formfactor' string formfactor in cols x rows,
 -- 'padding'    the spacing between buttons
-function pfUI.api.BarLayoutSize(bar,barsize,formfactor,iconsize,bordersize,padding)
+function pfUI.api.BarLayoutSize(bar,barsize,formfactor,iconsize,bordersize,padding,uneven,fillmode)
   assert(barsize > 0 and barsize <= NUM_ACTIONBAR_BUTTONS,"BarLayoutSize: barsize "..tostring(barsize).." is invalid")
-  local formfactor = pfUI.api.BarLayoutFormfactor(formfactor)
-  local cols, rows = unpack(pfGridmath[barsize][formfactor])
+  local cols, rows = ResolveBarLayout(barsize, formfactor, uneven)
+  if not cols or not rows then cols, rows = unpack(pfGridmath[barsize][1]) end
   local width = (iconsize + bordersize*2+padding) * cols + padding
   local height = (iconsize + bordersize*2+padding) * rows + padding
   bar._size = {width,height}
@@ -1144,16 +1295,88 @@ end
 -- 'iconsize'     size of the button
 -- 'bordersize'   default bordersize
 -- 'padding'      the spacing between buttons
-function pfUI.api.BarButtonAnchor(button,basename,buttonindex,barsize,formfactor,iconsize,bordersize,padding)
+function pfUI.api.BarButtonAnchor(button,basename,buttonindex,barsize,formfactor,iconsize,bordersize,padding,uneven,fillmode)
   assert(barsize > 0 and barsize <= NUM_ACTIONBAR_BUTTONS,"BarButtonAnchor: barsize "..tostring(barsize).." is invalid")
-  local formfactor = pfUI.api.BarLayoutFormfactor(formfactor)
+  local cols, rows, mode, orientation = ResolveBarLayout(barsize, formfactor, uneven)
+  if not cols or not rows then
+    cols, rows, mode, orientation = unpack(pfGridmath[barsize][1]), "rows", "DOWN"
+  end
+
+  -- fillmode: remap buttonindex to slotindex (grid position in native fill order)
+  -- only needed when fill direction differs from layout mode
+  local slotindex = buttonindex
+  if fillmode == "row" and mode == "cols" then
+    local full = math.floor(barsize / rows)
+    local rem = barsize - full * rows
+    local n = 0
+    for r = 1, rows do
+      local w = full + ((r <= rem) and 1 or 0)
+      if n + w >= buttonindex then
+        local c = buttonindex - n
+        slotindex = (c - 1) * rows + r
+        break
+      end
+      n = n + w
+    end
+  elseif fillmode == "col" and mode == "rows" then
+    local full = math.floor(barsize / cols)
+    local rem = barsize - full * cols
+    local n = 0
+    for c = 1, cols do
+      local h = full + ((c <= rem) and 1 or 0)
+      if n + h >= buttonindex then
+        local r = buttonindex - n
+        slotindex = (r - 1) * cols + c
+        break
+      end
+      n = n + h
+    end
+  end
+
   local parent = button:GetParent()
-  local cols, rows = unpack(pfGridmath[barsize][formfactor])
-  if buttonindex == 1 then
-    button._anchor = {"TOPLEFT", parent, "TOPLEFT", bordersize+padding, -bordersize-padding}
+  local step = iconsize + bordersize*2 + padding
+  local row, col
+  if mode == "cols" then
+    col = math.ceil(slotindex / rows)
+    row = slotindex - ((col-1) * rows)
   else
-    local col = buttonindex-((math.ceil(buttonindex/cols)-1)*cols)
-    button._anchor = col==1 and {"TOP",_G[basename..(buttonindex-cols)],"BOTTOM",0,-(bordersize*2+padding)} or {"LEFT",_G[basename..(buttonindex-1)],"RIGHT",(bordersize*2+padding),0}
+    row = math.ceil(slotindex / cols)
+    col = slotindex - ((row-1) * cols)
+  end
+  if mode == "cols" and orientation == "LEFT" then
+    local final_col = math.ceil(barsize / rows)
+    local count = barsize - (final_col - 1) * rows
+    if count > 0 and count < rows then
+      if col == final_col then col = 1 else col = col + 1 end
+    end
+  elseif mode == "rows" and orientation == "UP" then
+    local final_row = math.ceil(barsize / cols)
+    local count = barsize - (final_row - 1) * cols
+    if count > 0 and count < cols then
+      if row == final_row then row = 1 else row = row + 1 end
+    end
+  end
+  local x = bordersize + padding + (col - 1) * step
+  local y = -bordersize - padding - (row - 1) * step
+  if slotindex == 1 then
+    button._anchor = {"TOPLEFT", parent, "TOPLEFT", x, y}
+  else
+    button._anchor = {"TOPLEFT", parent, "TOPLEFT", x, y}
+    if mode == "cols" then
+      local final_col = math.ceil(barsize / rows)
+      local count = barsize - (final_col - 1) * rows
+      local target_col = (orientation == "LEFT") and 1 or cols
+      if count > 0 and count < rows and col == target_col and row == 1 then
+        button._anchor[5] = button._anchor[5] - (rows - count) * step / 2
+      end
+    else
+      local final_row = math.ceil(barsize / cols)
+      local count = barsize - (final_row - 1) * cols
+      local target_row = (orientation == "UP") and 1 or rows
+      if count > 0 and count < cols and row == target_row and col == 1 then
+        button._anchor[4] = button._anchor[4] + (cols - count) * step / 2
+      end
+    end
   end
   return button._anchor
 end
@@ -1184,6 +1407,10 @@ function pfUI.api.EnableAutohide(frame, timeout, combat)
   end
 
   frame.hover:SetScript("OnUpdate", function()
+    -- throttle to 0.05s
+    if (this.tick or 0) > GetTime() then return end
+    this.tick = GetTime() + 0.05
+
     if this.activeTo == "keep" then return end
 
     if MouseIsOver(this, 10, -10, -10, 10) then
@@ -1283,6 +1510,7 @@ end
 -- return r,g,b and hexcolor
 local gradientcolors = {}
 function pfUI.api.GetColorGradient(perc)
+  if not perc or perc ~= perc then perc = 0 end -- NaN guard: NaN ~= NaN is true in Lua
   perc = perc > 1 and 1 or perc
   perc = perc < 0 and 0 or perc
   perc = floor(perc*100)/100
@@ -1370,4 +1598,34 @@ function pfUI.api.GetNoNameObject(frame, objtype, layer, arg1, arg2)
       end
     end
   end
+end
+
+-- [ TryMemoizedFuncLoadstringForSpellCasts ]
+-- Memoizes lua function strings for spell casts to improve performance.
+-- Supports both string functions and direct function values.
+-- 'funcOrStr'  [function|string]  Either a function or a lua string to execute
+-- return:      [function|nil]     The function to execute, or nil on error
+local memoizedFuncs = {}
+function pfUI.api.TryMemoizedFuncLoadstringForSpellCasts(funcOrStr)
+  -- If it's already a function, return it directly
+  if type(funcOrStr) == "function" then
+    return funcOrStr
+  end
+  
+  -- If it's a string, try to memoize it
+  if type(funcOrStr) == "string" then
+    -- Check if we've already compiled this string
+    if memoizedFuncs[funcOrStr] then
+      return memoizedFuncs[funcOrStr]
+    end
+    
+    -- Try to compile the string
+    local func = loadstring(funcOrStr)
+    if func then
+      memoizedFuncs[funcOrStr] = func
+      return func
+    end
+  end
+  
+  return nil
 end
