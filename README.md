@@ -1,7 +1,7 @@
 # pfUI - Turtle WoW Edition
 
 [![Version](https://img.shields.io/badge/version-8.3.0-blue.svg)](https://github.com/me0wg4ming/pfUI)
-[![OctoWoW](https://img.shields.io/badge/Turtle%20WoW-1.18.0-brightgreen.svg)](https://turtlecraft.gg/)
+[![OctoWoW](https://img.shields.io/badge/Turtle%20WoW-1.18.1-brightgreen.svg)](https://octowow.st/)
 [![SuperWoW](https://img.shields.io/badge/SuperWoW-Optional-yellow.svg)](https://github.com/balakethelock/SuperWoW)
 [![Nampower](https://img.shields.io/badge/Nampower-Required-purple.svg)](https://gitea.com/avitasia/nampower)
 [![UnitXP](https://img.shields.io/badge/UnitXP__SP3-Optional-yellow.svg)](https://codeberg.org/konaka/UnitXP_SP3)
