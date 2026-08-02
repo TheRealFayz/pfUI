@@ -2,6 +2,11 @@ pfUI:RegisterModule("raid", "vanilla:tbc", function ()
   -- do not go further on disabled UFs
   if C.unitframes.disable == "1" then return end
 
+  -- tell RaidFrame.lua pfUI replaces party frames
+  HookAddonOrVariable("Blizzard_RaidUI", function()
+    GROUP_REPLACE_PARTY = "1"
+  end)
+
   pfUI.uf.raid = CreateFrame("Frame", "pfRaidUpdater", UIParent)
 
   local maxraid = tonumber(C.unitframes.maxraid)
@@ -84,9 +89,22 @@ pfUI:RegisterModule("raid", "vanilla:tbc", function ()
 
   pfUI.uf.raid:Hide()
   pfUI.uf.raid:RegisterEvent("RAID_ROSTER_UPDATE")
+  pfUI.uf.raid:RegisterEvent("PARTY_MEMBERS_CHANGED")
+  pfUI.uf.raid:RegisterEvent("PARTY_LEADER_CHANGED")
   pfUI.uf.raid:RegisterEvent("VARIABLES_LOADED")
-  pfUI.uf.raid:SetScript("OnEvent", function() this:Show() end)
+  pfUI.uf.raid:SetScript("OnEvent", function()
+    this:Show()
+    -- Debounce: delay update by 0.5s to batch rapid roster changes (mass swaps)
+    this.pendingUpdate = GetTime() + 0.5
+  end)
   pfUI.uf.raid:SetScript("OnUpdate", function()
+    -- Wait for debounce: don't update until 0.5s after last event
+    if this.pendingUpdate and GetTime() < this.pendingUpdate then return end
+    -- Throttle raid roster updates to 1 FPS max
+    if (this.tick or 0) > GetTime() then return end
+    this.tick = GetTime() + 1.0
+    this.pendingUpdate = nil
+
     -- don't proceed without raid or during combat
     if not UnitInRaid("player") or (InCombatLockdown and InCombatLockdown()) then return end
 
@@ -109,6 +127,32 @@ pfUI:RegisterModule("raid", "vanilla:tbc", function ()
       end
     end
 
+    -- Smart GUID-based updates: only refresh frames where unit changed
+    if pfUI.uf.guidTracker then
+      local tracker = pfUI.uf.guidTracker
+      
+      for i = 1, maxraid do
+        local frame = pfUI.uf.raid[i]
+        if frame and frame.id and frame.id > 0 then
+          local unit = "raid" .. frame.id
+          local newGuid = GetUnitGUID(unit)
+          local oldGuid = tracker.frameToGuid[frame]
+          
+          if newGuid ~= oldGuid then
+            -- GUID changed = different player = need full update
+            tracker.frameToGuid[frame] = newGuid
+            frame.update_full = true
+            frame.update_aura = true  -- Force aura refresh!
+          end
+        end
+      end
+    end
+
+    -- rebuild unitmap after frame IDs are assigned
+    if pfUI.uf.RebuildUnitmap then
+      pfUI.uf.RebuildUnitmap()
+    end
+
     this:Hide()
   end)
 
@@ -121,7 +165,8 @@ pfUI:RegisterModule("raid", "vanilla:tbc", function ()
   end
 
   hooksecurefunc("UnitPopup_OnClick", function()
-    local dropdownFrame = _G[UIDROPDOWNMENU_INIT_MENU]
+    local dropdownFrame = UIDROPDOWNMENU_INIT_MENU and _G[UIDROPDOWNMENU_INIT_MENU]
+    if not dropdownFrame then return end
     local button = this.value
     local unit = dropdownFrame.unit
     local name = dropdownFrame.name

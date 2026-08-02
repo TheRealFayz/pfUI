@@ -4,10 +4,10 @@ setfenv(1, pfUI:GetEnvironment())
 --[[ libcast ]]--
 -- A pfUI library that detects and saves all ongoing castbars of players, NPCs and enemies.
 -- The library also includes spells that usually don't have a castbar like Multi-Shot and Aimed Shot.
--- This is exclusivly used for vanilla in order to provide UnitChannelInfo and UnitCastingInfo functions.
+-- This is exclusivly used for vanilla in order to provide pfGetChannelInfo and pfGetCastInfo functions.
 --
 -- External functions:
---   UnitChannelInfo(unit)
+--   pfGetChannelInfo(unit)
 --     Returns information on the spell currently cast by the specified unit.
 --     Returns nil if no spell is being cast.
 --
@@ -19,7 +19,7 @@ setfenv(1, pfUI:GetEnvironment())
 --     endTime[Number] - Specifies when casting will end, in milliseconds.
 --     isTradeSkill[Boolean] - (DUMMY) Specifies if the cast is a tradeskill
 --
---   UnitCastingInfo(unit)
+--   pfGetCastInfo(unit)
 --     Returns information on the spell currently channeled by the specified unit.
 --     Returns nil if no spell is being channeled.
 --
@@ -53,14 +53,78 @@ local scanner = libtipscan:GetScanner("libcast")
 local libcast = CreateFrame("Frame", "pfEnemyCast")
 local player = UnitName("player")
 
-UnitChannelInfo = _G.UnitChannelInfo or function(unit)
+pfGetChannelInfo = function(unit)
   -- convert to name if unitstring was given
-  unit = pfValidUnits[unit] and UnitName(unit) or unit
+  local unitName = pfValidUnits[unit] and UnitName(unit) or unit
+  
+  -- Get GUID if Nampower is available
+  local guid = nil
+  
+  -- Check if unit itself is a GUID (starts with "0x")
+  if type(unit) == "string" and string.sub(unit, 1, 2) == "0x" then
+    guid = unit  -- unit IS the GUID
+  elseif pfValidUnits[unit] and UnitExists then
+    -- unit is a token like "target" - get GUID from it
+    local unitGuid = GetUnitGUID(unit)
+    guid = unitGuid
+  end
+  
+  -- For player: ALWAYS use libcast.db because it handles channel updates correctly
+  local isPlayer = unit == "player" or unitName == player
+  
+  if isPlayer then
+    local cast, nameSubtext, text, texture, startTime, endTime, isTradeSkill
+    local db = libcast.db[player]
 
+    if db and db.cast and db.start + db.casttime / 1000 > GetTime() then
+      if not db.channel then return end
+      cast = db.cast
+      nameSubtext = db.rank
+      text = ""
+      texture = db.icon
+      startTime = db.start * 1000
+      endTime = startTime + db.casttime
+      isTradeSkill = nil
+    elseif db then
+      db.cast = nil
+      db.rank = nil
+      db.start = nil
+      db.casttime = nil
+      db.icon = nil
+      db.channel = nil
+    end
+
+    return cast, nameSubtext, text, texture, startTime, endTime, isTradeSkill
+  end
+  
+  -- For non-player units: use libdebuff GUID-based tracking or libcast.db
+  -- Try GUID-based lookup first (from libdebuff's SPELL_START tracking)
+  local db = nil
+  if guid and pfUI.libdebuff_casts and pfUI.libdebuff_casts[guid] then
+    -- Use libdebuff's cast tracking (from SPELL_START_OTHER events)
+    local castData = pfUI.libdebuff_casts[guid]
+    if castData.event == "START" and castData.endTime and castData.endTime > GetTime() then
+      -- Convert libdebuff format to libcast format
+      db = {
+        cast = castData.spellName,
+        rank = nil,
+        start = castData.startTime,
+        casttime = castData.duration * 1000, -- Convert back to ms
+        icon = castData.icon,
+        channel = nil -- TODO: libdebuff should distinguish channel vs cast
+      }
+    end
+  end
+  
+  -- Fallback to name-based lookup (CHAT_MSG castbars)
+  -- Skip when GUID is available to avoid same-name mob bleed
+  if not db and not guid and libcast.db[unitName] then
+    db = libcast.db[unitName]
+  end
+  
+  -- Fallback to libcast.db for non-player units
   local cast, nameSubtext, text, texture, startTime, endTime, isTradeSkill
-  local db = libcast.db[unit]
 
-  -- clean legacy values
   if db and db.cast and db.start + db.casttime / 1000 > GetTime() then
     if not db.channel then return end
     cast = db.cast
@@ -71,7 +135,6 @@ UnitChannelInfo = _G.UnitChannelInfo or function(unit)
     endTime = startTime + db.casttime
     isTradeSkill = nil
   elseif db then
-    -- remove cast action to the database
     db.cast = nil
     db.rank = nil
     db.start = nil
@@ -83,14 +146,78 @@ UnitChannelInfo = _G.UnitChannelInfo or function(unit)
   return cast, nameSubtext, text, texture, startTime, endTime, isTradeSkill
 end
 
-UnitCastingInfo = _G.UnitCastingInfo or function(unit)
+pfGetCastInfo = function(unit)
   -- convert to name if unitstring was given
-  unit = pfValidUnits[unit] and UnitName(unit) or unit
+  local unitName = pfValidUnits[unit] and UnitName(unit) or unit
+  
+  -- Get GUID if Nampower is available
+  local guid = nil
+  
+  -- Check if unit itself is a GUID (starts with "0x")
+  if type(unit) == "string" and string.sub(unit, 1, 2) == "0x" then
+    guid = unit  -- unit IS the GUID
+  elseif pfValidUnits[unit] and UnitExists then
+    -- unit is a token like "target" - get GUID from it
+    local unitGuid = GetUnitGUID(unit)
+    guid = unitGuid
+  end
+  
+  -- For player: ALWAYS use libcast.db because it handles pushback correctly
+  local isPlayer = unit == "player" or unitName == player
+  
+  if isPlayer then
+    local cast, nameSubtext, text, texture, startTime, endTime, isTradeSkill
+    local db = libcast.db[player]
 
+    if db and db.cast and db.start + db.casttime / 1000 > GetTime() then
+      if db.channel then return end
+      cast = db.cast
+      nameSubtext = db.rank or ""
+      text = ""
+      texture = db.icon
+      startTime = db.start * 1000
+      endTime = startTime + db.casttime
+      isTradeSkill = nil
+    elseif db then
+      db.cast = nil
+      db.rank = nil
+      db.start = nil
+      db.casttime = nil
+      db.icon = nil
+      db.channel = nil
+    end
+
+    return cast, nameSubtext, text, texture, startTime, endTime, isTradeSkill
+  end
+  
+  -- For non-player units: use libdebuff GUID-based tracking or libcast.db
+  -- Try GUID-based lookup first (from libdebuff's SPELL_START tracking)
+  local db = nil
+  if guid and pfUI.libdebuff_casts and pfUI.libdebuff_casts[guid] then
+    -- Use libdebuff's cast tracking (from SPELL_START_OTHER events)
+    local castData = pfUI.libdebuff_casts[guid]
+    if castData.event == "START" and castData.endTime and castData.endTime > GetTime() then
+      -- Convert libdebuff format to libcast format
+      db = {
+        cast = castData.spellName,
+        rank = nil,
+        start = castData.startTime,
+        casttime = castData.duration * 1000, -- Convert back to ms
+        icon = castData.icon,
+        channel = nil -- TODO: libdebuff should distinguish channel vs cast
+      }
+    end
+  end
+  
+  -- Fallback to name-based lookup (CHAT_MSG castbars)
+  -- Skip when GUID is available to avoid same-name mob bleed
+  if not db and not guid and libcast.db[unitName] then
+    db = libcast.db[unitName]
+  end
+  
+  -- Fallback to libcast.db for non-player units
   local cast, nameSubtext, text, texture, startTime, endTime, isTradeSkill
-  local db = libcast.db[unit]
 
-  -- clean legacy values
   if db and db.cast and db.start + db.casttime / 1000 > GetTime() then
     if db.channel then return end
     cast = db.cast
@@ -101,7 +228,6 @@ UnitCastingInfo = _G.UnitCastingInfo or function(unit)
     endTime = startTime + db.casttime
     isTradeSkill = nil
   elseif db then
-    -- remove cast action to the database
     db.cast = nil
     db.rank = nil
     db.start = nil
@@ -182,17 +308,35 @@ libcast:RegisterEvent("SPELLCAST_CHANNEL_STOP")
 libcast:RegisterEvent("SPELLCAST_CHANNEL_UPDATE")
 
 local mob, spell, icon, _
+local lastSpellId = nil  -- spellId cached from SPELL_START_SELF (Nampower)
+
 libcast:SetScript("OnEvent", function()
   -- Fill database with player casts
   if event == "SPELLCAST_START" then
-    icon = L["spells"][arg1] and L["spells"][arg1].icon and string.format("%s%s", "Interface\\Icons\\", L["spells"][arg1].icon) or lastcasttex
-    -- add cast action to the database
+    -- Get icon from Nampower using spellId cached from SPELL_START_SELF
+    icon = nil
+    if lastSpellId and GetSpellRecField and GetSpellIconTexture then
+      local iconId = GetSpellRecField(lastSpellId, "spellIconID")
+      if iconId then
+        icon = GetSpellIconTexture(iconId)
+        if icon and not string.find(icon, "\\") then
+          icon = "Interface\\Icons\\" .. icon
+        end
+      end
+    end
+    -- fallback to L["spells"] / lastcasttex if Nampower didn't provide icon
+    if not icon then
+      icon = L["spells"][arg1] and L["spells"][arg1].icon and string.format("%s%s", "Interface\\Icons\\", L["spells"][arg1].icon) or lastcasttex
+    end
+    lastSpellId = nil
+
     this.db[player].cast = arg1
     this.db[player].rank = lastrank
     this.db[player].start = GetTime()
     this.db[player].casttime = arg2
     this.db[player].icon = icon
     this.db[player].channel = nil
+    
     if not L["spells"][arg1] or not L["spells"][arg1].icon or not L["spells"][arg1].t then
       L["spells"][arg1] = L["spells"][arg1] or { }
       L["spells"][arg1].icon = L["spells"][arg1].icon or icon
@@ -200,6 +344,7 @@ libcast:SetScript("OnEvent", function()
     end
     lastcasttex, lastrank = nil, nil
   elseif event == "SPELLCAST_STOP" or event == "SPELLCAST_FAILED" or event == "SPELLCAST_INTERRUPTED" then
+    lastSpellId = nil
     if this.db[player] and not this.db[player].channel then
       -- remove cast action to the database
       this.db[player].cast = nil
@@ -214,7 +359,9 @@ libcast:SetScript("OnEvent", function()
     end
   elseif event == "SPELLCAST_DELAYED" then
     if this.db[player].cast then
-      this.db[player].start = this.db[player].start + arg1/1000
+      -- Pushback: increase casttime instead of shifting start
+      -- arg1 is the delay amount in milliseconds
+      this.db[player].casttime = this.db[player].casttime + arg1
     end
   elseif event == "SPELLCAST_CHANNEL_START" then
     -- add cast action to the database
@@ -224,6 +371,7 @@ libcast:SetScript("OnEvent", function()
     this.db[player].casttime = arg1
     this.db[player].icon = L["spells"][arg2] and L["spells"][arg2].icon and string.format("%s%s", "Interface\\Icons\\", L["spells"][arg2].icon) or lastcasttex
     this.db[player].channel = true
+    
     lastcasttex, lastrank = nil, nil
   elseif event == "SPELLCAST_CHANNEL_STOP" then
     if this.db[player] and this.db[player].channel then
@@ -374,7 +522,12 @@ libcast.customcast[strlower(multishot)] = function(begin, duration)
 end
 
 local function CastCustom(id, bookType, rawSpellName, rank, texture, castingTime)
-  if not id or not rawSpellName or not castingTime then return end -- ignore if the spell is not found or if it is instant-cast
+  if not id or not rawSpellName then return end -- ignore if the spell is not found
+  if not castingTime or castingTime == 0 then
+    -- instant-cast: clear lastcasttex so next cast doesn't inherit this icon
+    lastcasttex, lastrank = nil, nil
+    return
+  end
 
   lastrank = rank
   lastcasttex = texture
@@ -382,7 +535,7 @@ local function CastCustom(id, bookType, rawSpellName, rank, texture, castingTime
   local func = libcast.customcast[strlower(rawSpellName)]
   if not func then return end
 
-  if GetSpellCooldown(id, bookType) == 0 or UnitCastingInfo(player) then return end -- detect casting
+  if GetSpellCooldown(id, bookType) == 0 or pfGetCastInfo(player) then return end -- detect casting
 
   func(true)
 end
@@ -414,6 +567,12 @@ hooksecurefunc("UseAction", function(slot, target, button)
 
   CastCustom(cachedSpellId, cachedBookType, cachedRawSpellName, cachedRank, cachedTexture, cachedCastingTime)
 end)
+
+-- Cache spellId from SPELL_START_SELF so SPELLCAST_START can use it for icon lookup
+pfUI.libdebuff_spell_start_self_hooks = pfUI.libdebuff_spell_start_self_hooks or {}
+pfUI.libdebuff_spell_start_self_hooks["libcast_icon"] = function(spellId)
+  lastSpellId = spellId
+end
 
 -- add libcast to pfUI API
 pfUI.api.libcast = libcast

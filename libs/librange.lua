@@ -39,26 +39,29 @@ local spells = {
   },
 }
 
--- use native IsSpellInRange checker for tbc and skip
--- the whole targeting approach that is required for vanilla
-if pfUI.expansion == "tbc" then
-  local spell
+-- Use Nampower's IsSpellInRange if available (vanilla only)
+-- This provides more accurate range checking without needing to find spell slots
+local nampower_spell
+if GetNampowerVersion then
   librange:RegisterEvent("LEARNED_SPELL_IN_TAB")
   librange:RegisterEvent("PLAYER_ENTERING_WORLD")
   librange:SetScript("OnEvent", function()
     -- abort on non healing classes
     if not spells[class] then return end
 
+    nampower_spell = nil
+
     for i = 1, GetNumSpellTabs() do
       local _, _, offset, num = GetSpellTabInfo(i)
       for id = offset + 1, offset + num do
         local name, rank = GetSpellName(id, BOOKTYPE_SPELL)
-        local texture = GetSpellTexture(name)
+        local texture = GetSpellTexture(id, BOOKTYPE_SPELL)
 
-        for _, tex in pairs(spells[class]) do
-          if tex == texture then
-            spell = name
-            return
+        if texture then
+          for _, tex in pairs(spells[class]) do
+            if tex == texture then
+              nampower_spell = name
+            end
           end
         end
       end
@@ -66,8 +69,12 @@ if pfUI.expansion == "tbc" then
   end)
 
   function librange:UnitInSpellRange(unit)
-    if not spell then return nil end
-    return IsSpellInRange(spell, unit) == 1 and true or nil
+    if not nampower_spell then return nil end
+    -- Nampower's IsSpellInRange returns 1 if in range, 0 if not, -1 if invalid
+    local result = IsSpellInRange(nampower_spell, unit)
+    if result == 1 then return 1
+    elseif result == 0 then return nil
+    else return nil end
   end
 
   -- add librange to pfUI API
@@ -114,12 +121,35 @@ combo:SetScript("OnEvent", function()
   hascombopoints = GetComboPoints() > 0
 end)
 
+-- Flag to prevent UnitXP calls during logout (crash prevention)
+local librange_isLoggingOut = false
+
+-- Detect UnitXP_SP3 once at load time to avoid pcall+closure overhead per tick.
+-- UnitXP_SP3 exposes UnitXP("distanceBetween", ...) — test it once and cache the result.
+local hasUnitXP_SP3 = false
+if UnitXP then
+  local ok, val = pcall(UnitXP, "distanceBetween", "player", "player")
+  if ok and val then
+    hasUnitXP_SP3 = true
+  end
+end
+
 librange:Hide()
 librange:RegisterEvent("ACTIONBAR_SLOT_CHANGED")
 librange:RegisterEvent("PLAYER_ENTERING_WORLD")
 librange:RegisterEvent("PLAYER_ENTER_COMBAT")
 librange:RegisterEvent("PLAYER_LEAVE_COMBAT")
+librange:RegisterEvent("PLAYER_LOGOUT")
+librange:RegisterEvent("PLAYER_LEAVING_WORLD")
 librange:SetScript("OnEvent", function()
+  -- Handle logout to prevent UnitXP crashes during shutdown
+  if event == "PLAYER_LOGOUT" or event == "PLAYER_LEAVING_WORLD" then
+    librange_isLoggingOut = true
+    this:SetScript("OnUpdate", nil)  -- Stop OnUpdate completely
+    this:Hide()
+    return
+  end
+
   -- disable range checking activities
   if pfUI_config.unitframes.rangecheck == "0" or not spells[class] then
     this:Hide()
@@ -147,6 +177,9 @@ local target_event = TargetFrame_OnEvent
 local target_nop = function() return end
 
 librange:SetScript("OnUpdate", function()
+  -- Prevent UnitXP calls during logout (crash prevention)
+  if librange_isLoggingOut then return end
+
   if ( this.tick or 1) > GetTime() then
     return
   else
@@ -161,8 +194,19 @@ librange:SetScript("OnUpdate", function()
   if this.id <= numunits and librange.slot then
     local unit = units[this.id]
     if not UnitIsUnit("target", unit) then
-      -- try to read distance via superwow first
-      if superwow_active then
+      -- Try UnitXP_SP3 first (most accurate distance measurement)
+      if hasUnitXP_SP3 then
+        local unitxp_distance = UnitXP("distanceBetween", "player", unit)
+        if unitxp_distance then
+          local threshold = (tonumber(C.unitframes.rangecheck_distance) or 40) + 5
+          unitdata[unit] = unitxp_distance < threshold and 1 or 0
+          this.id = this.id + 1
+          return
+        end
+      end
+
+      -- try to read distance via superwow second
+      if HasSuperWoW() and UnitPosition then
         local x1, y1, z1 = UnitPosition("player")
         local x2, y2, z2 = UnitPosition(unit)
         -- only continue if we got position values

@@ -438,6 +438,17 @@ pfUI:RegisterModule("bags", "vanilla:tbc", function ()
     end
 
     local texture, count, locked, quality = GetContainerItemInfo(bag, slot)
+
+    -- Nampower 4.1.4+: spellChargesRemaining gives accurate charge count for
+    -- charged items (e.g. Brilliant Mana Oil).
+    -- Only use it when stackCount == 1 and spellChargesRemaining > 1,
+    -- otherwise we'd override normal stack counts.
+    if GetBagItem then
+      local ok, itemInfo = pcall(GetBagItem, bag, slot)
+      if ok and itemInfo and itemInfo.stackCount == 1 and itemInfo.spellChargesRemaining and itemInfo.spellChargesRemaining > 1 then
+        count = itemInfo.spellChargesRemaining
+      end
+    end
     local linkstr = LinkToStr(GetContainerItemLink(bag, slot))
     local _, _, q, _, _, _, itype = GetItemInfo(linkstr)
 
@@ -1045,6 +1056,46 @@ pfUI:RegisterModule("bags", "vanilla:tbc", function ()
                 end
 
                 if strfind(strlower(itemstring), strlower(this:GetText()), 1, true) then
+                  pfUI.bags[bag].slots[slot].frame:SetAlpha(1)
+                end
+              end
+            end
+          end
+        end)
+
+        frame.search:SetScript("OnLeave", function()
+          frame.search.edit:ClearFocus()
+        end)
+
+        frame.search:SetScript("OnHide", function()
+          frame.search.edit:SetText(T["Search"])
+          for bag = -2, 11 do
+            if pfUI.bags[bag] then
+              local bagsize = GetContainerNumSlots(bag)
+              if bag == -2 and pfUI.bag.showKeyring == true then bagsize = GetKeyRingSize() end
+              for slot = 1, bagsize do
+                if pfUI.bags[bag] and pfUI.bags[bag].slots[slot] then
+                  pfUI.bags[bag].slots[slot].frame:SetAlpha(1)
+                end
+              end
+            end
+          end
+        end)
+
+        frame.search.edit:SetScript("OnMouseUp", function()
+          if arg1 == "RightButton" then
+            this:ClearFocus()
+          end
+        end)
+
+        frame.search:SetScript("OnHide", function()
+          frame.search.edit:SetText(T["Search"])
+          for bag = -2, 11 do
+            if pfUI.bags[bag] then
+              local bagsize = GetContainerNumSlots(bag)
+              if bag == -2 and pfUI.bag.showKeyring == true then bagsize = GetKeyRingSize() end
+              for slot = 1, bagsize do
+                if pfUI.bags[bag] and pfUI.bags[bag].slots[slot] then
                   pfUI.bags[bag].slots[slot].frame:SetAlpha(1)
                 end
               end
